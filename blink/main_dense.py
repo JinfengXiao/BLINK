@@ -11,6 +11,7 @@ import sys
 from tqdm import tqdm
 import logging
 import torch
+import torch.nn as nn
 import numpy as np
 from colorama import init
 from termcolor import colored
@@ -257,6 +258,46 @@ def _run_biencoder(biencoder, dataloader, candidate_encoding, top_k=100, indexer
         labels.extend(label_ids.data.numpy())
         nns.extend(indicies)
         all_scores.extend(scores)
+    return labels, nns, all_scores
+
+def _run_biencoder_gpu(biencoder, dataloader, candidate_encoding, top_k=100, indexer=None, device="cuda"):
+    biencoder.model.eval()
+    biencoder.half()
+    if device == "cuda":
+        biencoder.to(device)
+    for layer in biencoder.modules():
+        if isinstance(layer, nn.BatchNorm2d):
+            layer.float()
+    labels = []
+    nns = []
+    all_scores = []
+    for batch in tqdm(dataloader):
+        if device == "cuda":
+            batch = tuple(t.to(device) for t in batch)
+        context_input, _, label_ids = batch
+        with torch.no_grad():
+            if indexer is not None:
+                context_encoding = biencoder.encode_context(context_input).numpy()
+                context_encoding = np.ascontiguousarray(context_encoding)
+                scores, indicies = indexer.search_knn(context_encoding, top_k)
+            else:
+                scores = biencoder.score_candidate(
+                    context_input, None, cand_encs=candidate_encoding.half().to(device)
+                )
+                scores, indicies = scores.topk(top_k)
+                if device == "cuda":
+                    #print(scores)   # RuntimeError: copy_if failed to synchronize: cudaErrorIllegalAddress: an illegal memory access was encountered
+                    scores_cpu = scores.cpu().data.numpy()  # RuntimeError: CUDA error: an illegal memory access was encountered
+                    indicies_cpu = indicies.cpu().data.numpy()
+                else:
+                    scores_cpu = scores.data.numpy()
+                    indicies_cpu = indicies.data.numpy()
+        if device == "cuda":
+            labels.extend(label_ids.cpu().data.numpy())
+        else:
+            labels.extend(label_ids.data.numpy())
+        nns.extend(indicies_cpu)
+        all_scores.extend(scores_cpu)
     return labels, nns, all_scores
 
 
